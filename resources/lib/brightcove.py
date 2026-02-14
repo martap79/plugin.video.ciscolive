@@ -44,8 +44,8 @@ def _fetch_policy_key():
         raw = resp.read()
         try:
             data = gzip.decompress(raw)
-        except Exception:
-            data = raw
+        except (OSError, IOError):
+            data = raw  # Response wasn't gzip-encoded despite header
         config = json.loads(data)
         pk = config.get("video_cloud", {}).get("policy_key")
         if pk:
@@ -65,7 +65,7 @@ def _fetch_policy_key():
         raw = resp.read()
         try:
             js = gzip.decompress(raw).decode("utf-8", errors="replace")
-        except Exception:
+        except (OSError, IOError):
             js = raw.decode("utf-8", errors="replace")
         m = re.search(r'policyKey\s*:\s*["\']([^"\']+)', js)
         if m:
