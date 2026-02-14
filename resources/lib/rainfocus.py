@@ -143,7 +143,10 @@ SESSION_TYPES = [
 
 
 def _cache_path(key):
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+    except OSError:
+        pass
     h = hashlib.md5(key.encode()).hexdigest()
     return os.path.join(CACHE_DIR, h + ".json")
 
@@ -169,6 +172,17 @@ def _cache_set(key, payload):
             json.dump({"_ts": time.time(), "payload": payload}, f)
     except Exception:
         pass
+
+
+def _cached_fetch(cache_key, fetch_fn):
+    """Check cache first, otherwise call fetch_fn(), cache the result, and return it."""
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    result = fetch_fn()
+    if result is not None:
+        _cache_set(cache_key, result)
+    return result
 
 
 def _api_post(endpoint, params, profile_id=None):

@@ -284,6 +284,9 @@ class LoginCallbackHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         """Handle GET requests."""
+        if self.server.is_rate_limited(self.client_address[0]):
+            self.send_error(429, "Too many requests")
+            return
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
@@ -314,6 +317,9 @@ class LoginCallbackHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Handle POST requests (manual token submission)."""
+        if self.server.is_rate_limited(self.client_address[0]):
+            self.send_error(429, "Too many requests")
+            return
         path = urlparse(self.path).path
 
         if path == "/token":
@@ -433,11 +439,28 @@ class LoginCallbackHandler(BaseHTTPRequestHandler):
 class LoginServer(HTTPServer):
     """HTTP server with slots for received JWT and cancellation."""
 
+    # Rate limiting: max requests per IP within window
+    RATE_LIMIT = 20
+    RATE_WINDOW = 60  # seconds
+
     def __init__(self, server_address, handler_class, local_ip="localhost"):
         self.received_jwt = None
         self.local_ip = local_ip
         self._shutdown_event = threading.Event()
+        self._request_log = {}  # ip -> list of timestamps
         HTTPServer.__init__(self, server_address, handler_class)
+
+    def is_rate_limited(self, client_ip):
+        """Check if a client IP has exceeded the rate limit."""
+        now = time.time()
+        timestamps = self._request_log.get(client_ip, [])
+        # Prune old entries
+        timestamps = [t for t in timestamps if now - t < self.RATE_WINDOW]
+        self._request_log[client_ip] = timestamps
+        if len(timestamps) >= self.RATE_LIMIT:
+            return True
+        timestamps.append(now)
+        return False
 
     def request_stop(self):
         """Signal the server to stop (non-blocking, no deadlock)."""
