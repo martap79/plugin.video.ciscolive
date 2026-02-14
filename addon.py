@@ -951,13 +951,12 @@ def _browser_login():
                 pass
 
     if jwt and jwt != "__sso_success__":
-        # JWT came from ssoToken exchange (already saved by login_server)
-        # or from manual /token POST. Validate and save if needed.
+        # JWT came from ssoToken exchange (already saved by login_server).
+        # Validate before accepting to prevent token injection.
         if auth.is_authenticated():
             dialog.notification("Cisco Live", "Login successful!",
                                 xbmcgui.NOTIFICATION_INFO, 3000)
         else:
-            # Token from manual POST, save it
             success, msg = auth.login_with_token(jwt)
             if success:
                 dialog.notification("Cisco Live", "Login successful!",

@@ -83,7 +83,10 @@ def _load_token():
 
 def _save_token(token_data):
     """Save authentication token to disk."""
-    os.makedirs(TOKEN_DIR, exist_ok=True)
+    try:
+        os.makedirs(TOKEN_DIR, exist_ok=True)
+    except OSError:
+        pass
     try:
         with open(TOKEN_FILE, "w") as f:
             json.dump(token_data, f)

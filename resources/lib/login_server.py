@@ -487,7 +487,7 @@ def run_login_flow(timeout=LOGIN_TIMEOUT):
     port = _find_free_port()
     local_ip = _get_local_ip()
 
-    server = LoginServer(("0.0.0.0", port), LoginCallbackHandler, local_ip)
+    server = LoginServer((local_ip, port), LoginCallbackHandler, local_ip)
     server.timeout = 1  # handle_request() returns after 1 second max
 
     # Start server in background thread

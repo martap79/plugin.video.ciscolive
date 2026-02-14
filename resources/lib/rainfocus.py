@@ -375,6 +375,9 @@ def search_event_sessions(section_id, page=0, page_size=PAGE_SIZE,
     }
     _cache_set(cache_key, result)
     return result
+
+
+def get_session(session_id):
     """Fetch a single session by its RainFocus ID."""
     cache_key = "session:" + session_id
     cached = _cache_get(cache_key)
