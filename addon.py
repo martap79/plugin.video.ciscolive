@@ -88,7 +88,10 @@ def main_menu():
     xbmcplugin.setContent(ADDON_HANDLE, "videos")
 
     if auth.is_authenticated():
-        acct = "Account & Settings - [COLOR green]Logged in[/COLOR]"
+        if auth.token_expires_soon():
+            acct = "Account & Settings - [COLOR yellow]Token expiring soon[/COLOR]"
+        else:
+            acct = "Account & Settings - [COLOR green]Logged in[/COLOR]"
     else:
         acct = "Account & Settings - [COLOR red]Not logged in[/COLOR]"
 

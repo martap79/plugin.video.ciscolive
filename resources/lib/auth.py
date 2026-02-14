@@ -108,7 +108,7 @@ def get_auth_headers():
     Get authentication headers for RainFocus API calls.
 
     Returns dict with rfAuthToken, rfWidgetId, rfApiProfileId if authenticated,
-    or empty dict if not authenticated.
+    or empty dict if not authenticated (including expired tokens).
     """
     token = _load_token()
     if not token:
@@ -126,9 +126,28 @@ def get_auth_headers():
 
 
 def is_authenticated():
-    """Check if we have a valid authentication token."""
+    """Check if we have a valid, non-expired authentication token."""
     token = _load_token()
     return token is not None and bool(token.get("jwt"))
+
+
+def token_expires_soon(threshold=600):
+    """
+    Check if the stored token will expire within the given threshold.
+
+    Args:
+        threshold: Seconds before expiry to consider "soon" (default 10 min).
+
+    Returns:
+        True if token expires within threshold, False if healthy or no token.
+    """
+    token = _load_token()
+    if not token:
+        return False
+    expires = token.get("expires", 0)
+    if expires <= 0:
+        return False  # Unknown expiry (manual tokens)
+    return (expires - time.time()) < threshold
 
 
 def login_with_sso_token(sso_token, sso_profile_id=None):
