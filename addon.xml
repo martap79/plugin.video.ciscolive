@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addon id="plugin.video.ciscolive"
        name="Cisco Live On-Demand"
-       version="2.0.5"
+       version="2.0.6"
        provider-name="Nox">
   <requires>
     <import addon="xbmc.python" version="3.0.0"/>
