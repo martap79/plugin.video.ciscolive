@@ -856,7 +856,7 @@ def show_account():
         choice = dialog.select("Account", [
             "Status: Logged in",
             "Log out",
-            "Re-authenticate (browser login)",
+            "Re-authenticate",
         ])
         if choice == 1:
             auth.clear_token()
@@ -866,13 +866,48 @@ def show_account():
             _browser_login()
     else:
         choice = dialog.select("Account Setup", [
-            "Sign in with Cisco (opens browser)",
+            "Sign in using QR/Phone",
             "Help",
         ])
         if choice == 0:
             _browser_login()
         elif choice == 1:
             _show_login_help()
+
+
+def _credentials_login():
+    """Login with Cisco account username and password."""
+    dialog = xbmcgui.Dialog()
+
+    kb = xbmc.Keyboard("", "Cisco account email address")
+    kb.doModal()
+    if not kb.isConfirmed():
+        return
+    username = kb.getText().strip()
+    if not username:
+        return
+
+    kb2 = xbmc.Keyboard("", "Password", True)  # True = hidden input
+    kb2.doModal()
+    if not kb2.isConfirmed():
+        return
+    password = kb2.getText().strip()
+    if not password:
+        return
+
+    # Show a brief progress indicator
+    progress = xbmcgui.DialogProgress()
+    progress.create("Cisco Live", "Signing in...")
+    try:
+        success, msg = auth.login_with_credentials(username, password)
+    finally:
+        progress.close()
+
+    if success:
+        dialog.notification("Cisco Live", "Login successful!",
+                            xbmcgui.NOTIFICATION_INFO, 3000)
+    else:
+        dialog.ok("Cisco Live", msg)
 
 
 def _browser_login():
@@ -1109,18 +1144,13 @@ def _show_login_help():
         "Authentication Help",
         "Cisco Live On-Demand requires a free Cisco account to access\n"
         "most session videos.\n\n"
-        "[B]Method 1: Browser Login (Recommended)[/B]\n"
-        "Choose 'Sign in with Cisco' from the Account menu.\n"
+        "[B]How to sign in[/B]\n"
+        "Choose 'Sign in using QR/Phone' from the Account menu.\n"
         "A QR code will appear on screen. Scan it with your phone\n"
         "and sign in with your Cisco account. The token is sent\n"
         "back to Kodi automatically.\n\n"
-        "[B]Method 2: Manual Token Entry[/B]\n"
-        "1. Open a browser and go to ciscolive.com/on-demand\n"
-        "2. Click 'Log in' and sign in with your Cisco account\n"
-        "3. Open Developer Tools (F12) > Network tab\n"
-        "4. Look for API requests to events.rainfocus.com\n"
-        "5. Copy the rfAuthToken header value\n"
-        "6. Paste it in the manual token entry dialog\n\n"
+        "[COLOR yellow]Important: Your phone must be connected to the\n"
+        "same network (Wi-Fi) as your Kodi device for this to work.[/COLOR]\n\n"
         "[B]No Cisco account?[/B]\n"
         "Create one free at ciscolive.com.\n"
         "No products or contracts required.\n\n"

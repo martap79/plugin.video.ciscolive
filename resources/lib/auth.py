@@ -23,11 +23,11 @@ import os
 import time
 
 try:
-    from urllib.request import Request, urlopen
+    from urllib.request import Request, urlopen, build_opener, HTTPRedirectHandler, HTTPCookieProcessor
     from urllib.parse import urlencode
     from urllib.error import HTTPError, URLError
 except ImportError:
-    from urllib2 import Request, urlopen, HTTPError, URLError
+    from urllib2 import Request, urlopen, build_opener, HTTPRedirectHandler, HTTPCookieProcessor, HTTPError, URLError
     from urllib import urlencode
 
 try:
@@ -262,6 +262,191 @@ def login_with_global_cookie(cookie_value):
 
     except (URLError, Exception) as e:
         return False, "Cookie login error: {}".format(str(e))
+
+
+def login_with_credentials(username, password):
+    """
+    Log in with Cisco account username and password.
+
+    Uses the Okta primary authentication API on id.cisco.com to get a
+    sessionToken, then completes the SAML flow programmatically to
+    obtain a RainFocus JWT.
+
+    Args:
+        username: Cisco account email address
+        password: Account password
+
+    Returns:
+        tuple of (success: bool, message: str)
+    """
+    username = username.strip()
+    password = password.strip()
+    if not username or not password:
+        return False, "Username and password are required"
+
+    # Step 1: Okta primary authentication -> sessionToken
+    _log("Authenticating with Cisco identity...")
+    authn_body = json.dumps({
+        "username": username,
+        "password": password,
+    }).encode("utf-8")
+
+    authn_headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    req = Request("https://id.cisco.com/api/v1/authn",
+                  data=authn_body, headers=authn_headers)
+
+    try:
+        resp = urlopen(req, timeout=20)
+        authn_data = json.loads(resp.read().decode("utf-8"))
+    except HTTPError as e:
+        error_body = ""
+        try:
+            error_data = json.loads(e.read().decode("utf-8"))
+            error_body = error_data.get("errorSummary", "")
+        except Exception:
+            pass
+        if e.code == 401:
+            return False, "Invalid username or password"
+        return False, "Authentication failed: {}".format(error_body or e.code)
+    except (URLError, Exception) as e:
+        return False, "Connection error: {}".format(str(e))
+
+    status = authn_data.get("status", "")
+    session_token = authn_data.get("sessionToken", "")
+
+    if status == "MFA_REQUIRED":
+        return False, ("Multi-factor authentication required. "
+                       "Use the QR/Phone sign-in method instead.")
+    if status == "LOCKED_OUT":
+        return False, "Account is locked. Please reset via id.cisco.com."
+    if status == "PASSWORD_EXPIRED":
+        return False, "Password expired. Please update at id.cisco.com."
+    if status != "SUCCESS" or not session_token:
+        return False, "Unexpected auth status: {}".format(status)
+
+    _log("Okta auth successful, exchanging for RainFocus token...")
+
+    # Step 2: Use sessionToken to complete SAML flow
+    # The SAML URL with sessionToken auto-completes without user interaction
+    saml_url = (
+        "https://id.cisco.com/app/ciscoid_rainfocus_1/exkl5r8gqEFXndKvm5d6/sso/saml"
+        "?sessionToken={}".format(session_token)
+    )
+
+    try:
+        # Follow redirects manually to capture the ssoToken
+        import http.cookiejar
+        cj = http.cookiejar.CookieJar()
+        opener = build_opener(
+            HTTPCookieProcessor(cj),
+            _NoRedirectHandler()
+        )
+
+        # Request SAML endpoint with sessionToken
+        req2 = Request(saml_url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            resp2 = opener.open(req2, timeout=20)
+            body2 = resp2.read().decode("utf-8", errors="replace")
+        except HTTPError as e2:
+            if e2.code in (301, 302, 303, 307, 308):
+                body2 = ""
+                location = e2.headers.get("Location", "")
+            else:
+                return False, "SAML request failed: HTTP {}".format(e2.code)
+
+        # The SAML response is an HTML form that auto-submits to RainFocus
+        # Extract the SAMLResponse from the form
+        import re
+        saml_match = re.search(
+            r'name="SAMLResponse"\s+value="([^"]+)"', body2)
+        relay_match = re.search(
+            r'name="RelayState"\s+value="([^"]+)"', body2)
+
+        if not saml_match:
+            # Maybe we got redirected. Check for ssoToken in any redirect
+            return False, ("Could not extract SAML response. "
+                           "Try the QR/Phone sign-in method.")
+
+        saml_response = saml_match.group(1)
+        relay_state = relay_match.group(1) if relay_match else ""
+
+        # Step 3: POST SAMLResponse to RainFocus ACS endpoint
+        _log("Posting SAML assertion to RainFocus...")
+        acs_url = "https://events.rainfocus.com/api/saml"
+        acs_body = urlencode({
+            "SAMLResponse": saml_response,
+            "RelayState": relay_state,
+        }).encode("utf-8")
+
+        req3 = Request(acs_url, data=acs_body, headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": "https://id.cisco.com",
+        })
+        try:
+            resp3 = opener.open(req3, timeout=20)
+            body3 = resp3.read().decode("utf-8", errors="replace")
+        except HTTPError as e3:
+            if e3.code in (301, 302, 303, 307, 308):
+                location3 = e3.headers.get("Location", "")
+                # Check for ssoToken in redirect
+                sso_match = re.search(r'ssoToken=([^&]+)', location3)
+                if sso_match:
+                    sso_token = sso_match.group(1)
+                    return login_with_sso_token(sso_token)
+            # Even if redirect, check cookies for global auth cookie
+            pass
+
+        # Step 4: Check if we got the global cookie from the SAML exchange
+        for cookie in cj:
+            if cookie.name == GLOBAL_COOKIE_NAME:
+                _log("Got global auth cookie, exchanging for JWT...")
+                return login_with_global_cookie(cookie.value)
+
+        # Step 5: Try performLogin with any cookies we have
+        cookie_header = "; ".join(
+            "{}={}".format(c.name, c.value) for c in cj)
+        if cookie_header:
+            login_headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "rfWidgetId": AUTH_WIDGET_ID,
+                "rfApiProfileId": AUTH_PROFILE_ID,
+                "Cookie": cookie_header,
+                "Origin": "https://ciscolive.cisco.com",
+            }
+            login_body = urlencode({"performLogin": "true"}).encode("utf-8")
+            req4 = Request(LOGIN_URL, data=login_body, headers=login_headers)
+            try:
+                resp4 = urlopen(req4, timeout=20)
+                data4 = json.loads(resp4.read().decode("utf-8"))
+                jwt = _extract_jwt(data4)
+                if jwt:
+                    token_data = {
+                        "method": "credentials",
+                        "jwt": jwt,
+                        "username": username,
+                        "saved_at": time.time(),
+                        "expires": time.time() + 86400,
+                    }
+                    _save_token(token_data)
+                    return True, "Login successful"
+            except Exception:
+                pass
+
+        return False, ("Authentication succeeded but token exchange failed. "
+                       "Try the QR/Phone sign-in method.")
+
+    except Exception as e:
+        return False, "Token exchange error: {}".format(str(e))
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """HTTP handler that doesn't follow redirects automatically."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise HTTPError(newurl, code, msg, headers, fp)
 
 
 def login_with_token(jwt_token):
