@@ -21,6 +21,7 @@ The JWT token is stored locally and used until it expires.
 import json
 import os
 import time
+import http.cookiejar
 
 try:
     from urllib.request import Request, urlopen, build_opener, HTTPRedirectHandler, HTTPCookieProcessor
@@ -86,7 +87,7 @@ def _save_token(token_data):
     try:
         os.makedirs(TOKEN_DIR, exist_ok=True)
     except OSError:
-        pass
+        return
     try:
         with open(TOKEN_FILE, "w") as f:
             json.dump(token_data, f)
@@ -339,7 +340,6 @@ def login_with_credentials(username, password):
 
     try:
         # Follow redirects manually to capture the ssoToken
-        import http.cookiejar
         cj = http.cookiejar.CookieJar()
         opener = build_opener(
             HTTPCookieProcessor(cj),

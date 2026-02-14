@@ -15,11 +15,14 @@ The ssoToken approach works because RainFocus appends ?ssoToken=xxx to
 whatever URL is specified in the rfparam parameter of the SAML request.
 This is a server-side token exchange - no cross-domain cookie issues.
 
-Fallback: manual JWT token entry if ssoToken flow fails.
+Security: Each login flow generates a unique state nonce. The callback
+and token endpoints only accept requests that include the correct state,
+preventing token injection from other devices on the network.
 """
 
 import json
 import os
+import secrets
 import socket
 import threading
 import time
@@ -252,7 +255,7 @@ PAGE_FAILURE = """<!DOCTYPE html>
             xhr.onerror = function() {{
                 alert('Could not reach Kodi server. Make sure you\\'re on the same network.');
             }};
-            xhr.send(JSON.stringify({{token: token}}));
+            xhr.send(JSON.stringify({{token: token, state: '{state}'}}));
         }}
     </script>
 </body>
@@ -298,6 +301,11 @@ class LoginCallbackHandler(BaseHTTPRequestHandler):
             self._send_html(html)
 
         elif path == "/callback":
+            # Validate state nonce to prevent token injection
+            state = query.get("state", [None])[0]
+            if state != self.server.state_nonce:
+                self.send_error(403, "Invalid state parameter")
+                return
             # SAML callback - extract ssoToken from query params
             self._handle_callback(query)
 
@@ -328,6 +336,17 @@ class LoginCallbackHandler(BaseHTTPRequestHandler):
 
             try:
                 data = json.loads(body)
+                # Require state nonce to prevent injection from other devices
+                state = data.get("state", "")
+                if state != self.server.state_nonce:
+                    self.send_response(403)
+                    self._cors_headers()
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(
+                        json.dumps({"error": "invalid state"}).encode("utf-8"))
+                    return
+
                 token = data.get("token", "").strip()
                 if token:
                     # Store as JWT directly (manual entry)
@@ -390,6 +409,7 @@ class LoginCallbackHandler(BaseHTTPRequestHandler):
                 html = PAGE_FAILURE.format(
                     error_detail="SSO token exchange failed: {}".format(msg),
                     retry_url=login_url,
+                    state=self.server.state_nonce,
                 )
                 self._send_html(html)
                 return
@@ -401,13 +421,15 @@ class LoginCallbackHandler(BaseHTTPRequestHandler):
         html = PAGE_FAILURE.format(
             error_detail="No ssoToken in callback. Received params: {}".format(raw_query),
             retry_url=login_url,
+            state=self.server.state_nonce,
         )
         self._send_html(html)
 
     def _build_saml_url(self):
         """Build the SAML login URL with rfparam pointing to our callback."""
-        callback_url = "http://{}:{}/callback".format(
-            self.server.local_ip, self.server.server_port)
+        callback_url = "http://{}:{}/callback?state={}".format(
+            self.server.local_ip, self.server.server_port,
+            self.server.state_nonce)
 
         params = {
             "rfapp": "events",
@@ -446,20 +468,24 @@ class LoginServer(HTTPServer):
     def __init__(self, server_address, handler_class, local_ip="localhost"):
         self.received_jwt = None
         self.local_ip = local_ip
+        self.state_nonce = secrets.token_urlsafe(32)
         self._shutdown_event = threading.Event()
+        self._rate_lock = threading.Lock()
         self._request_log = {}  # ip -> list of timestamps
         HTTPServer.__init__(self, server_address, handler_class)
 
     def is_rate_limited(self, client_ip):
         """Check if a client IP has exceeded the rate limit."""
         now = time.time()
-        timestamps = self._request_log.get(client_ip, [])
-        # Prune old entries
-        timestamps = [t for t in timestamps if now - t < self.RATE_WINDOW]
-        self._request_log[client_ip] = timestamps
-        if len(timestamps) >= self.RATE_LIMIT:
-            return True
-        timestamps.append(now)
+        with self._rate_lock:
+            timestamps = self._request_log.get(client_ip, [])
+            # Prune old entries
+            timestamps = [t for t in timestamps if now - t < self.RATE_WINDOW]
+            if len(timestamps) >= self.RATE_LIMIT:
+                self._request_log[client_ip] = timestamps
+                return True
+            timestamps.append(now)
+            self._request_log[client_ip] = timestamps
         return False
 
     def request_stop(self):

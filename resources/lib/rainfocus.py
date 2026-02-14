@@ -143,10 +143,7 @@ SESSION_TYPES = [
 
 
 def _cache_path(key):
-    try:
-        os.makedirs(CACHE_DIR, exist_ok=True)
-    except OSError:
-        pass
+    os.makedirs(CACHE_DIR, exist_ok=True)
     h = hashlib.md5(key.encode()).hexdigest()
     return os.path.join(CACHE_DIR, h + ".json")
 
