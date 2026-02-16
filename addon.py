@@ -25,7 +25,6 @@ import xbmcvfs
 
 from resources.lib import rainfocus
 from resources.lib import brightcove
-from resources.lib import auth
 from resources.lib import history
 
 ADDON = xbmcaddon.Addon()
@@ -87,21 +86,13 @@ def _level_badge(level):
 def main_menu():
     xbmcplugin.setContent(ADDON_HANDLE, "videos")
 
-    if auth.is_authenticated():
-        if auth.token_expires_soon():
-            acct = "Account & Settings - [COLOR yellow]Token expiring soon[/COLOR]"
-        else:
-            acct = "Account & Settings - [COLOR green]Logged in[/COLOR]"
-    else:
-        acct = "Account & Settings - [COLOR red]Not logged in[/COLOR]"
-
     items = [
         ("New Releases",                  build_url("new_releases"),  "DefaultRecentlyAddedVideos.png"),
         ("Browse by Event",               build_url("events"),        "DefaultVideoPlaylists.png"),
         ("Browse by Category",            build_url("categories"),    "DefaultGenre.png"),
         ("Search All Sessions",           build_url("search"),        "DefaultAddonsSearch.png"),
         ("Continue Watching",             build_url("history"),       "DefaultRecentlyAddedVideos.png"),
-        (acct,                            build_url("account"),       "DefaultUser.png"),
+        ("About",                         build_url("about"),         "DefaultAddonHelper.png"),
     ]
     for label, url, icon in items:
         li = xbmcgui.ListItem(label)
@@ -731,22 +722,13 @@ def play_video(video_id, title="", session_id="", code="", event=""):
     history.add(session_id=session_id, title=title, video_id=video_id,
                 code=code, event=event)
 
-    # Try authenticated first, then direct Brightcove
-    stream_url, mime_type = auth.get_video_url(session_id, video_id)
-    if not stream_url:
-        stream_url, mime_type = brightcove.best_stream(video_id, prefer_hls=True)
+    # Resolve video stream via Brightcove
+    stream_url, mime_type = brightcove.best_stream(video_id, prefer_hls=True)
 
     if not stream_url:
-        if not auth.is_authenticated():
-            xbmcgui.Dialog().ok(
-                "Cisco Live",
-                "Could not play this video.\n"
-                "Most videos require a Cisco account.\n"
-                "Go to Account in the main menu to set up authentication.")
-        else:
-            xbmcgui.Dialog().notification(
-                "Cisco Live", "Could not resolve video stream",
-                xbmcgui.NOTIFICATION_ERROR)
+        xbmcgui.Dialog().notification(
+            "Cisco Live", "Could not play video",
+            xbmcgui.NOTIFICATION_ERROR)
         xbmcplugin.setResolvedUrl(ADDON_HANDLE, False, xbmcgui.ListItem())
         return
 
@@ -850,315 +832,35 @@ def show_info(session_id):
 
 
 # ---------------------------------------------------------------------------
-# Account
+# About
 # ---------------------------------------------------------------------------
 
-def show_account():
-    dialog = xbmcgui.Dialog()
-    if auth.is_authenticated():
-        choice = dialog.select("Account", [
-            "Status: Logged in",
-            "Log out",
-            "Re-authenticate",
-        ])
-        if choice == 1:
-            auth.clear_token()
-            dialog.notification("Cisco Live", "Logged out",
-                                xbmcgui.NOTIFICATION_INFO)
-        elif choice == 2:
-            _browser_login()
-    else:
-        choice = dialog.select("Account Setup", [
-            "Sign in using QR/Phone",
-            "Help",
-        ])
-        if choice == 0:
-            _browser_login()
-        elif choice == 1:
-            _show_login_help()
-
-
-def _credentials_login():
-    """Login with Cisco account username and password."""
-    dialog = xbmcgui.Dialog()
-
-    kb = xbmc.Keyboard("", "Cisco account email address")
-    kb.doModal()
-    if not kb.isConfirmed():
-        return
-    username = kb.getText().strip()
-    if not username:
-        return
-
-    kb2 = xbmc.Keyboard("", "Password", True)  # True = hidden input
-    kb2.doModal()
-    if not kb2.isConfirmed():
-        return
-    password = kb2.getText().strip()
-    if not password:
-        return
-
-    # Show a brief progress indicator
-    progress = xbmcgui.DialogProgress()
-    progress.create("Cisco Live", "Signing in...")
-    try:
-        success, msg = auth.login_with_credentials(username, password)
-    finally:
-        progress.close()
-
-    if success:
-        dialog.notification("Cisco Live", "Login successful!",
-                            xbmcgui.NOTIFICATION_INFO, 3000)
-    else:
-        dialog.ok("Cisco Live", msg)
-
-
-def _browser_login():
-    from resources.lib import login_server
-    dialog = xbmcgui.Dialog()
-
-    server = None
-    qr_win = None
-    try:
-        login_url, same_device_url, port, server, server_thread = (
-            login_server.run_login_flow())
-    except Exception as e:
-        dialog.ok("Cisco Live", "Could not start login server:", str(e))
-        return
-
-    try:
-        # Generate QR code for the login URL
-        qr_path = _generate_qr(login_url)
-
-        # Show QR code in a custom window, or fall back to a progress dialog
-        progress = None
-        if qr_path:
-            qr_win = _QRCodeWindow(login_url, qr_path)
-            qr_win.show()
-        else:
-            # No QR available - show a cancellable progress dialog with the URL
-            progress = xbmcgui.DialogProgress()
-            progress.create(
-                "Cisco Live Login",
-                "Open this URL on your phone or computer:\n\n"
-                "{}\n\n"
-                "Sign in with your Cisco account.".format(login_url))
-
-        # Poll for token while QR/dialog is shown
-        # Use short sleeps so cancellation is responsive
-        timeout = 300
-        start = time.time()
-        jwt = None
-        while (time.time() - start) < timeout:
-            if qr_win and qr_win.cancelled:
-                break
-            if progress and progress.iscanceled():
-                break
-            if xbmc.Monitor().abortRequested():
-                break
-            jwt = login_server.get_token_from_server(server)
-            if jwt:
-                break
-            # Update progress percentage
-            if progress:
-                elapsed = int(time.time() - start)
-                pct = min(int(elapsed * 100 / timeout), 99)
-                progress.update(pct)
-            xbmc.sleep(500)  # 500ms for snappy cancel response
-
-    finally:
-        # ALWAYS clean up, even on exception
-        if qr_win:
-            try:
-                qr_win.close()
-            except Exception:
-                pass
-            del qr_win
-
-        if progress:
-            try:
-                progress.close()
-            except Exception:
-                pass
-
-        # Stop server (non-blocking, no deadlock)
-        if server:
-            try:
-                login_server.stop_server(server)
-            except Exception:
-                pass
-
-    if jwt and jwt != "__sso_success__":
-        # JWT came from ssoToken exchange (already saved by login_server).
-        # Validate before accepting to prevent token injection.
-        if auth.is_authenticated():
-            dialog.notification("Cisco Live", "Login successful!",
-                                xbmcgui.NOTIFICATION_INFO, 3000)
-        else:
-            success, msg = auth.login_with_token(jwt)
-            if success:
-                dialog.notification("Cisco Live", "Login successful!",
-                                    xbmcgui.NOTIFICATION_INFO, 3000)
-            else:
-                dialog.ok("Cisco Live",
-                           "Token received but validation failed:", msg)
-    elif jwt == "__sso_success__":
-        # SSO token exchange succeeded but JWT wasn't captured in server
-        # The auth module already saved it
-        dialog.notification("Cisco Live", "Login successful!",
-                            xbmcgui.NOTIFICATION_INFO, 3000)
-    else:
-        # Cancelled or timed out - just return quietly, don't show a dialog
-        # that could block. The user already pressed Back to cancel.
-        pass
-
-
-def _generate_qr(url):
-    """Generate a QR code PNG and return the file path. Uses bundled qrcode + pure Python PNG."""
-    try:
-        import struct
-        import zlib
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "resources", "lib"))
-        import qrcode as qrcode_mod
-
-        qr = qrcode_mod.QRCode(version=1, box_size=1, border=2)
-        qr.add_data(url)
-        qr.make(fit=True)
-        matrix = qr.get_matrix()
-
-        scale = 8
-        rows = len(matrix)
-        cols = len(matrix[0]) if matrix else 0
-        w = cols * scale
-        h = rows * scale
-
-        # Build raw grayscale image data
-        raw_rows = []
-        for row in matrix:
-            pixel_row = b""
-            for cell in row:
-                px = b"\x00" if cell else b"\xff"
-                pixel_row += px * scale
-            for _ in range(scale):
-                raw_rows.append(b"\x00" + pixel_row)
-        raw = b"".join(raw_rows)
-
-        def png_chunk(chunk_type, data):
-            c = chunk_type + data
-            crc = struct.pack(">I", zlib.crc32(c) & 0xffffffff)
-            return struct.pack(">I", len(data)) + c + crc
-
-        sig = b"\x89PNG\r\n\x1a\n"
-        ihdr = struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0)
-        compressed = zlib.compress(raw)
-        png_data = sig + png_chunk(b"IHDR", ihdr) + png_chunk(b"IDAT", compressed) + png_chunk(b"IEND", b"")
-
-        addon_data = xbmcvfs.translatePath(ADDON.getAddonInfo("profile"))
-        if not os.path.exists(addon_data):
-            os.makedirs(addon_data)
-        qr_path = os.path.join(addon_data, "login_qr.png")
-        with open(qr_path, "wb") as f:
-            f.write(png_data)
-        return qr_path
-    except Exception as e:
-        xbmc.log("CiscoLive: QR generation failed: {}".format(e), xbmc.LOGWARNING)
-        return None
-
-
-class _QRCodeWindow(xbmcgui.WindowDialog):
-    """Full-screen overlay showing QR code and login URL."""
-
-    def __init__(self, url, qr_path):
-        super().__init__()
-        self.cancelled = False
-        w = self.getWidth()
-        h = self.getHeight()
-
-        # Semi-transparent dark background
-        self.addControl(xbmcgui.ControlImage(0, 0, w, h, "",
-                        colorDiffuse="CC000000"))
-
-        # Title
-        title_y = int(h * 0.08)
-        self.addControl(xbmcgui.ControlLabel(
-            0, title_y, w, 50, "Cisco Live Login",
-            alignment=0x02, textColor="FFFFFFFF",
-            font="font_MainMenu"))
-
-        # QR code image (centered)
-        qr_size = min(int(h * 0.45), int(w * 0.35))
-        qr_x = (w - qr_size) // 2
-        qr_y = int(h * 0.18)
-        self.addControl(xbmcgui.ControlImage(
-            qr_x, qr_y, qr_size, qr_size, qr_path))
-
-        # Instructions below QR
-        text_y = qr_y + qr_size + int(h * 0.03)
-        self.addControl(xbmcgui.ControlLabel(
-            0, text_y, w, 40,
-            "Scan the QR code or open this URL on your phone:",
-            alignment=0x02, textColor="FFCCCCCC"))
-
-        # URL
-        url_y = text_y + 45
-        self.addControl(xbmcgui.ControlLabel(
-            0, url_y, w, 40, url,
-            alignment=0x02, textColor="FF00BFFF",
-            font="font13"))
-
-        # Bottom instruction
-        bottom_y = url_y + 50
-        self.addControl(xbmcgui.ControlLabel(
-            0, bottom_y, w, 40,
-            "Sign in with your Cisco account, then send the token back.",
-            alignment=0x02, textColor="FF999999"))
-
-        cancel_y = int(h * 0.90)
-        self.addControl(xbmcgui.ControlLabel(
-            0, cancel_y, w, 40,
-            "Press Back to cancel",
-            alignment=0x02, textColor="FF666666"))
-
-    def onAction(self, action):
-        if action.getId() in (10, 92):  # ACTION_PREVIOUS_MENU, ACTION_NAV_BACK
-            self.cancelled = True
-            self.close()
-
-
-def _enter_jwt_token():
-    dialog = xbmcgui.Dialog()
-    kb = xbmc.Keyboard("", "Paste your auth token")
-    kb.doModal()
-    if not kb.isConfirmed():
-        return
-    token = kb.getText().strip()
-    if not token:
-        return
-    success, msg = auth.login_with_token(token)
-    if success:
-        dialog.notification("Cisco Live", "Authentication successful!",
-                            xbmcgui.NOTIFICATION_INFO)
-    else:
-        dialog.ok("Cisco Live", "Authentication failed:", msg)
-
-
-def _show_login_help():
-    xbmcgui.Dialog().textviewer(
-        "Authentication Help",
-        "Cisco Live On-Demand requires a free Cisco account to access\n"
-        "most session videos.\n\n"
-        "[B]How to sign in[/B]\n"
-        "Choose 'Sign in using QR/Phone' from the Account menu.\n"
-        "A QR code will appear on screen. Scan it with your phone\n"
-        "and sign in with your Cisco account. The token is sent\n"
-        "back to Kodi automatically.\n\n"
-        "[COLOR yellow]Important: Your phone must be connected to the\n"
-        "same network (Wi-Fi) as your Kodi device for this to work.[/COLOR]\n\n"
-        "[B]No Cisco account?[/B]\n"
-        "Create one free at ciscolive.com.\n"
-        "No products or contracts required.\n\n"
-        "Tokens expire after several hours.\n"
-        "Re-authenticate when playback stops working.")
+def show_about():
+    """Show plugin information."""
+    version = ADDON.getAddonInfo("version")
+    lines = [
+        "[B]Cisco Live On-Demand[/B]",
+        "Version {}".format(version),
+        "",
+        "Browse and stream 14,000+ Cisco Live technical sessions",
+        "from events spanning 2018-2026.",
+        "",
+        "All videos are freely accessible without authentication.",
+        "",
+        "[B]Features:[/B]",
+        "• Browse by event, technology, and technical level",
+        "• Search across all sessions",
+        "• Multi-select filtering",
+        "• Watch history tracking",
+        "• Direct Brightcove streaming",
+        "",
+        "[B]Source:[/B]",
+        "github.com/martap79/plugin.video.ciscolive",
+        "",
+        "[B]Website:[/B]",
+        "ciscolive.com/on-demand",
+    ]
+    xbmcgui.Dialog().textviewer("About Cisco Live On-Demand", "\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -1226,8 +928,8 @@ def router():
                 filter_label=params.get("filter_label"),
                 search_text=params.get("search_text"),
                 extra_filters=params.get("extra_filters"))
-    elif action == "account":
-        show_account()
+    elif action == "about":
+        show_about()
     elif action == "history":
         show_history()
     elif action == "clear_history":
