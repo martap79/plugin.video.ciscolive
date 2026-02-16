@@ -723,12 +723,17 @@ def play_video(video_id, title="", session_id="", code="", event=""):
                 code=code, event=event)
 
     # Resolve video stream via Brightcove
-    stream_url, mime_type = brightcove.best_stream(video_id, prefer_hls=True)
+    try:
+        stream_url, mime_type = brightcove.best_stream(video_id, prefer_hls=True)
+    except Exception as e:
+        xbmc.log("CiscoLive: Video resolution error: {}".format(e), xbmc.LOGERROR)
+        stream_url, mime_type = None, None
 
     if not stream_url:
         xbmcgui.Dialog().notification(
-            "Cisco Live", "Could not play video",
-            xbmcgui.NOTIFICATION_ERROR)
+            "Cisco Live",
+            "Video unavailable. Check your network connection.",
+            xbmcgui.NOTIFICATION_ERROR, 5000)
         xbmcplugin.setResolvedUrl(ADDON_HANDLE, False, xbmcgui.ListItem())
         return
 

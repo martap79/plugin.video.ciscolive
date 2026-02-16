@@ -187,6 +187,8 @@ def _api_post(endpoint, params, profile_id=None):
     
     params values can be strings or lists. Lists produce repeated keys
     (e.g. {"search.technology": ["a", "b"]} -> "search.technology=a&search.technology=b").
+    
+    Returns parsed JSON dict on success, or None on network/API failure.
     """
     url = API_URL.format(endpoint=endpoint)
     # Build body with support for repeated keys (list values)
@@ -205,8 +207,8 @@ def _api_post(endpoint, params, profile_id=None):
     try:
         resp = urlopen(req, timeout=30)
         return json.loads(resp.read().decode("utf-8"))
-    except (HTTPError, URLError) as e:
-        raise RuntimeError("RainFocus API error: {}".format(e))
+    except (HTTPError, URLError):
+        return None
 
 
 def search_sessions(page=0, page_size=PAGE_SIZE, filters=None, profile_id=None):
@@ -244,6 +246,8 @@ def search_sessions(page=0, page_size=PAGE_SIZE, filters=None, profile_id=None):
         return cached
 
     data = _api_post("search", params, profile_id=profile_id)
+    if not data:
+        return {"items": [], "total": 0, "page": page, "page_size": effective_size}
     section = data.get("sectionList", [{}])[0] if data.get("sectionList") else {}
     items = section.get("items", [])
     total = section.get("total", 0)
@@ -280,7 +284,8 @@ def discover_event_sections():
         data = _api_post("search", {
             "type": "session", "size": "1", "sections": "true"
         }, profile_id=CURRENT_PROFILE_ID)
-        for s in data.get("sectionList", []):
+        if data:
+            for s in data.get("sectionList", []):
             sid = s.get("sectionId", "")
             total = s.get("total", 0)
             items = s.get("items", [])
@@ -302,6 +307,8 @@ def discover_event_sections():
             data = _api_post("search", {
                 "type": "session", "size": "50", "from": str(offset)
             }, profile_id=LEGACY_PROFILE_ID)
+            if not data:
+                break
             for s in data.get("sectionList", []):
                 for item in s.get("items", []):
                     ev = item.get("event", "")
@@ -368,6 +375,8 @@ def search_event_sessions(section_id, page=0, page_size=PAGE_SIZE,
         return cached
 
     data = _api_post("search", params, profile_id=CURRENT_PROFILE_ID)
+    if not data:
+        return {"items": [], "total": 0, "page": page, "page_size": effective_size}
 
     # Find the matching section
     target_items = []
@@ -396,6 +405,8 @@ def get_session(session_id):
         return cached
 
     data = _api_post("session", {"id": session_id})
+    if not data:
+        return None
     items = data.get("items", [])
     if not items:
         return None
@@ -447,6 +458,8 @@ def discover_events():
         # Extract unique events from section headers
         events_found = []
         data = _api_post("search", {"type": "session", "size": "1", "from": "0"})
+        if not data:
+            return EVENTS
         
         for section in data.get("sectionList", []):
             heading = section.get("sectionHeading", "")

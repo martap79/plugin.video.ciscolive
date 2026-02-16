@@ -6,6 +6,7 @@ using the Brightcove Playback API (edge.api.brightcove.com).
 """
 
 import json
+import threading
 
 try:
     from urllib.request import Request, urlopen
@@ -21,6 +22,7 @@ PLAYBACK_API = (
 )
 
 _POLICY_KEY = None
+_POLICY_LOCK = threading.Lock()
 
 
 def _fetch_policy_key():
@@ -30,51 +32,52 @@ def _fetch_policy_key():
     Response may be gzip-encoded.
     """
     global _POLICY_KEY
-    if _POLICY_KEY:
-        return _POLICY_KEY
-
-    import gzip
-
-    config_url = (
-        "https://players.brightcove.net/{account}/{player}_default/config.json"
-    ).format(account=rainfocus.BRIGHTCOVE_ACCOUNT, player=rainfocus.BRIGHTCOVE_PLAYER)
-    try:
-        req = Request(config_url, headers={"Accept-Encoding": "gzip"})
-        resp = urlopen(req, timeout=15)
-        raw = resp.read()
-        try:
-            data = gzip.decompress(raw)
-        except (OSError, IOError):
-            data = raw  # Response wasn't gzip-encoded despite header
-        config = json.loads(data)
-        pk = config.get("video_cloud", {}).get("policy_key")
-        if pk:
-            _POLICY_KEY = pk
+    with _POLICY_LOCK:
+        if _POLICY_KEY:
             return _POLICY_KEY
-    except Exception:
-        pass
 
-    # Fallback: try parsing the player JS for policyKey
-    import re
-    js_url = (
-        "https://players.brightcove.net/{account}/{player}_default/index.min.js"
-    ).format(account=rainfocus.BRIGHTCOVE_ACCOUNT, player=rainfocus.BRIGHTCOVE_PLAYER)
-    try:
-        req = Request(js_url, headers={"Accept-Encoding": "gzip"})
-        resp = urlopen(req, timeout=15)
-        raw = resp.read()
+        import gzip
+
+        config_url = (
+            "https://players.brightcove.net/{account}/{player}_default/config.json"
+        ).format(account=rainfocus.BRIGHTCOVE_ACCOUNT, player=rainfocus.BRIGHTCOVE_PLAYER)
         try:
-            js = gzip.decompress(raw).decode("utf-8", errors="replace")
-        except (OSError, IOError):
-            js = raw.decode("utf-8", errors="replace")
-        m = re.search(r'policyKey\s*:\s*["\']([^"\']+)', js)
-        if m:
-            _POLICY_KEY = m.group(1)
-            return _POLICY_KEY
-    except Exception:
-        pass
+            req = Request(config_url, headers={"Accept-Encoding": "gzip"})
+            resp = urlopen(req, timeout=15)
+            raw = resp.read()
+            try:
+                data = gzip.decompress(raw)
+            except (OSError, IOError):
+                data = raw  # Response wasn't gzip-encoded despite header
+            config = json.loads(data)
+            pk = config.get("video_cloud", {}).get("policy_key")
+            if pk:
+                _POLICY_KEY = pk
+                return _POLICY_KEY
+        except Exception:
+            pass
 
-    return None
+        # Fallback: try parsing the player JS for policyKey
+        import re
+        js_url = (
+            "https://players.brightcove.net/{account}/{player}_default/index.min.js"
+        ).format(account=rainfocus.BRIGHTCOVE_ACCOUNT, player=rainfocus.BRIGHTCOVE_PLAYER)
+        try:
+            req = Request(js_url, headers={"Accept-Encoding": "gzip"})
+            resp = urlopen(req, timeout=15)
+            raw = resp.read()
+            try:
+                js = gzip.decompress(raw).decode("utf-8", errors="replace")
+            except (OSError, IOError):
+                js = raw.decode("utf-8", errors="replace")
+            m = re.search(r'policyKey\s*:\s*["\']([^"\']+)', js)
+            if m:
+                _POLICY_KEY = m.group(1)
+                return _POLICY_KEY
+        except Exception:
+            pass
+
+        return None
 
 
 def resolve(video_id):
